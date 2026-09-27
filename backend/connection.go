@@ -203,7 +203,7 @@ func verifyBucket(connection *s3Connection) *dbxpluginsdk.PluginError {
 }
 
 func verifyBucketByListing(context context.Context, connection *s3Connection) error {
-	objects := connection.client.ListObjects(context, connection.bucket, minio.ListObjectsOptions{
+	objects := listObjectsCompatible(context, connection.client, connection.bucket, minio.ListObjectsOptions{
 		Recursive: false,
 		MaxKeys:   1,
 	})

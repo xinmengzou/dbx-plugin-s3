@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { inlineUploadBytes, uploadFile, uploadTarget } from "./uploads.js";
+import { inlineUploadBytes, uploadFile, uploadPathTarget, uploadTarget } from "./uploads.js";
 
 test("folder targets preserve hierarchy, Unicode, reserved characters and the root folder", () => {
   assert.equal(uploadTarget("s3://bucket/base/", { name: "a #%.txt", webkitRelativePath: "资料/子目录/a #%.txt" }), "s3://bucket/base/%E8%B5%84%E6%96%99/%E5%AD%90%E7%9B%AE%E5%BD%95/a%20%23%25.txt");
@@ -8,6 +8,7 @@ test("folder targets preserve hierarchy, Unicode, reserved characters and the ro
   for (const path of ["../x", "root/../x", "/root/x", "root//x", "root/./x", "root/\\x", "root/\0x"]) {
     assert.throws(() => uploadTarget("s3://bucket/", { webkitRelativePath: path }), /Invalid upload path/);
   }
+  assert.equal(uploadPathTarget("s3://bucket/base/", "screenshots/2026/09/26/a.png"), "s3://bucket/base/screenshots/2026/09/26/a.png");
 });
 
 test("small and empty files request a new version without bypassing overwrite protection", async () => {

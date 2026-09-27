@@ -3,11 +3,11 @@
   "manifest_version": 1,
   "id": "io.github.t8y2.s3",
   "name": "S3 Browser",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "publisher": "t8y2",
   "description": "S3-compatible object storage plugin for DBX.",
   "icon": "assets/plugin.svg",
-  "permissions": ["host.events", "host.binary"],
+  "permissions": ["host.events", "host.binary", "host.clipboard:read"],
   "engines": {
     "dbx": ">=0.5.68",
     "host_api": "1"

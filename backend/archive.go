@@ -123,7 +123,7 @@ func listArchiveMembers(context context.Context, connection *s3Connection, path 
 		remotePrefix += "/"
 	}
 	members := make([]archiveMember, 0, 16)
-	objects := connection.client.ListObjects(context, path.bucket, minio.ListObjectsOptions{Prefix: remotePrefix, Recursive: true})
+	objects := listObjectsCompatible(context, connection.client, path.bucket, minio.ListObjectsOptions{Prefix: remotePrefix, Recursive: true})
 	for object := range objects {
 		if object.Err != nil {
 			return nil, remoteError("S3 archive listing failed: " + object.Err.Error())

@@ -2,7 +2,10 @@ export const inlineUploadBytes = 256 * 1024;
 const chunkBytes = 1024 * 1024;
 
 export function uploadTarget(parent, file) {
-  const path = file.webkitRelativePath || file.name;
+  return uploadPathTarget(parent, file.webkitRelativePath || file.name);
+}
+
+export function uploadPathTarget(parent, path) {
   const segments = path.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === ".." || /[\\\0]/.test(segment))) {
     throw new Error(`Invalid upload path: ${path}`);

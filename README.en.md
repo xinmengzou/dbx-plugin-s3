@@ -20,7 +20,8 @@ S3 Browser is a plugin for [DBX](https://github.com/t8y2/dbx), the open-source d
 
 **Browsing**
 
-- Folder tree sidebar, breadcrumbs, and directory-first object listings.
+- Folders and files share one object list by default; the folder-tree sidebar remains available on demand alongside breadcrumbs.
+- Filter buckets, folders, and files by name, with bounded scans and continuation cursors for large directories.
 - Cursor pagination for large buckets.
 - Directory markers for folder creation and renames.
 
@@ -34,6 +35,7 @@ S3 Browser is a plugin for [DBX](https://github.com/t8y2/dbx), the open-source d
 - Cancel individual or ZIP downloads. DBX desktop hosts with native streaming-download support ask for the destination first, write chunks of at most 1 MiB to a temporary file, and replace the destination only after success. Cancellation and failures preserve existing files. This path removes the legacy 256 MiB file / 220 MiB ZIP source-data limits; ZIPs still allow at most 20,000 files. Older and Web hosts retain the existing size limits and post-download save dialog.
 - Object lists show sizes and S3 last-modified (upload or overwrite) times in the local timezone. The empty-area context menu supports refresh, folder creation, and uploads.
 - The entry context menu copies a path in absolute (`s3://bucket/key`) or relative (bucket-less) form, ready to paste into the path bar added in 0.1.17.
+- Upload a system clipboard image as PNG under `screenshots/YYYY/MM/DD/` in the current directory and automatically copy a 24-hour Markdown image link; DBX asks for explicit clipboard-read consent first.
 - AWS endpoint rewriting to dualstack is disabled by default and can be explicitly enabled in the connection form.
 - Optimistic write protection with ETags.
 
@@ -49,7 +51,8 @@ S3 Browser is a plugin for [DBX](https://github.com/t8y2/dbx), the open-source d
 
 **Previews**
 
-- Text and Markdown up to 2 MiB, Word documents and audio/video up to 4 MiB, spreadsheets up to 2 MiB. Preview limits only gate what the workbench renders; they never truncate or modify remote objects.
+- DBX hosts with media-URL support play and seek audio/video through bounded Range requests instead of buffering the whole object; older hosts retain the 4 MiB buffered preview fallback.
+- Text and Markdown are capped at 2 MiB, Word documents at 4 MiB, and spreadsheets at 2 MiB. Preview limits only gate what the workbench renders; they never truncate or modify remote objects.
 
 ## Requirements
 

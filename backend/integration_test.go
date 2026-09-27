@@ -30,9 +30,10 @@ type fakeS3Object struct {
 }
 
 type fakeS3Server struct {
-	mutex   sync.Mutex
-	bucket  string
-	objects map[string]fakeS3Object
+	mutex        sync.Mutex
+	bucket       string
+	objects      map[string]fakeS3Object
+	rejectListV2 bool
 }
 
 type fakeListResult struct {
@@ -41,6 +42,8 @@ type fakeListResult struct {
 	Prefix       string             `xml:"Prefix"`
 	KeyCount     int                `xml:"KeyCount"`
 	MaxKeys      int                `xml:"MaxKeys"`
+	Marker       string             `xml:"Marker,omitempty"`
+	NextMarker   string             `xml:"NextMarker,omitempty"`
 	IsTruncated  bool               `xml:"IsTruncated"`
 	EncodingType string             `xml:"EncodingType,omitempty"`
 	Contents     []fakeListObject   `xml:"Contents,omitempty"`
@@ -76,7 +79,13 @@ func (fake *fakeS3Server) ServeHTTP(response http.ResponseWriter, request *http.
 		response.WriteHeader(http.StatusNotFound)
 		return
 	}
-	if request.Method == http.MethodGet && request.URL.Query().Get("list-type") == "2" {
+	if request.Method == http.MethodGet && key == "" {
+		if fake.rejectListV2 && request.URL.Query().Get("list-type") == "2" {
+			response.Header().Set("Content-Type", "application/xml")
+			response.WriteHeader(http.StatusOK)
+			_ = xml.NewEncoder(response).Encode(fakeListResult{Name: fake.bucket, MaxKeys: 1, IsTruncated: true})
+			return
+		}
 		fake.list(response, request)
 		return
 	}
@@ -103,7 +112,20 @@ func (fake *fakeS3Server) ServeHTTP(response http.ResponseWriter, request *http.
 			return
 		}
 		writeObjectHeaders(response, object)
-		_, _ = response.Write(object.data)
+		data := object.data
+		if byteRange := request.Header.Get("Range"); byteRange != "" {
+			parsed, valid := parseMediaRange(byteRange, int64(len(data)))
+			if !valid {
+				response.Header().Set("Content-Range", "bytes */"+strconv.Itoa(len(data)))
+				response.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			data = data[parsed.start : parsed.end+1]
+			response.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			response.Header().Set("Content-Range", "bytes "+strconv.FormatInt(parsed.start, 10)+"-"+strconv.FormatInt(parsed.end, 10)+"/"+strconv.Itoa(len(object.data)))
+			response.WriteHeader(http.StatusPartialContent)
+		}
+		_, _ = response.Write(data)
 	case http.MethodPut:
 		if source := request.Header.Get("X-Amz-Copy-Source"); source != "" {
 			fake.copyObject(response, request, source, key)
@@ -168,6 +190,9 @@ func (fake *fakeS3Server) list(response http.ResponseWriter, request *http.Reque
 	prefix := request.URL.Query().Get("prefix")
 	delimiter := request.URL.Query().Get("delimiter")
 	startAfter := request.URL.Query().Get("start-after")
+	if startAfter == "" {
+		startAfter = request.URL.Query().Get("marker")
+	}
 	maxKeys, _ := strconv.Atoi(request.URL.Query().Get("max-keys"))
 	if maxKeys <= 0 {
 		maxKeys = 1000
@@ -181,7 +206,7 @@ func (fake *fakeS3Server) list(response http.ResponseWriter, request *http.Reque
 	}
 	fake.mutex.Unlock()
 	sort.Strings(keys)
-	result := fakeListResult{Name: fake.bucket, Prefix: prefix, MaxKeys: maxKeys, EncodingType: "url"}
+	result := fakeListResult{Name: fake.bucket, Prefix: prefix, MaxKeys: maxKeys, Marker: startAfter, EncodingType: "url"}
 	seenPrefixes := map[string]struct{}{}
 	for _, key := range keys {
 		remainder := strings.TrimPrefix(key, prefix)
@@ -314,6 +339,49 @@ func TestListDistinguishesEmptyFoldersFromMissingPrefixes(t *testing.T) {
 	}
 }
 
+func TestListUsesMarkerPaginationForMalformedV2Providers(t *testing.T) {
+	const bucket = "example-bucket"
+	fake, server := newFakeS3Server(bucket)
+	defer server.Close()
+	fake.rejectListV2 = true
+	fake.objects["alpha.txt"] = newFakeObject([]byte("alpha"), "text/plain")
+	fake.objects["beta.txt"] = newFakeObject([]byte("beta"), "text/plain")
+
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := minio.New(endpoint.Host, &minio.Options{
+		Creds:        credentials.NewStaticV4("access-key", "secret-key", ""),
+		Secure:       false,
+		Region:       "us-east-1",
+		BucketLookup: minio.BucketLookupPath,
+		MaxRetries:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := &plugin{connections: map[string]*s3Connection{
+		"connection-1": {bucket: bucket, client: client},
+	}}
+	base := map[string]any{"providerId": filesystemProvider, "connectionId": "connection-1"}
+	first, pluginError := invokeIntegration(t, instance, "filesystem/list", mergeIntegration(base, map[string]any{"uri": "s3:/", "limit": 1}))
+	if pluginError != nil {
+		t.Fatal(pluginError.Message)
+	}
+	cursor, ok := first["nextCursor"].(string)
+	if !ok || cursor == "" {
+		t.Fatalf("missing first-page cursor: %#v", first)
+	}
+	second, pluginError := invokeIntegration(t, instance, "filesystem/list", mergeIntegration(base, map[string]any{"uri": "s3:/", "limit": 1, "cursor": cursor}))
+	if pluginError != nil {
+		t.Fatal(pluginError.Message)
+	}
+	if !containsEntry(first, "alpha.txt", "file") || !containsEntry(second, "beta.txt", "file") {
+		t.Fatalf("marker pagination lost entries: first=%#v second=%#v", first, second)
+	}
+}
+
 func testListExistence(t *testing.T, basePath string) {
 	t.Helper()
 	const bucket = "example-bucket"
@@ -337,7 +405,7 @@ func testListExistence(t *testing.T, basePath string) {
 	}
 	instance := &plugin{connections: map[string]*s3Connection{}}
 	connectionParams := map[string]any{
-		"provider":   map[string]any{"id": pluginID + ".connection", "databaseType": "s3"},
+		"provider": map[string]any{"id": pluginID + ".connection", "databaseType": "s3"},
 		"connection": map[string]any{
 			"id":       "connection-1",
 			"database": bucket,
@@ -382,6 +450,13 @@ func testListExistence(t *testing.T, basePath string) {
 	full, pluginError := invokeIntegration(t, instance, "filesystem/list", mergeIntegration(base, map[string]any{"uri": "s3://example-bucket/full/", "limit": 10}))
 	if pluginError != nil {
 		t.Fatal(pluginError.Message)
+	}
+	filteredFull, pluginError := invokeIntegration(t, instance, "filesystem/list", mergeIntegration(base, map[string]any{"uri": "s3://example-bucket/full/", "limit": 10, "filter": "missing"}))
+	if pluginError != nil {
+		t.Fatal(pluginError.Message)
+	}
+	if len(filteredFull["entries"].([]filesystemEntry)) != 0 || filteredFull["exists"] != true {
+		t.Fatalf("filtered virtual folder must still exist: %#v", filteredFull)
 	}
 	if !containsEntry(full, "file.txt", "file") {
 		t.Fatalf("unexpected non-empty listing: %#v", full)
@@ -506,6 +581,13 @@ func testFilesystemLifecycle(t *testing.T, basePath string) {
 	}
 	if len(list["entries"].([]filesystemEntry)) != 2 {
 		t.Fatal("listing exposed objects outside the configured base path")
+	}
+	filtered, pluginError := invokeIntegration(t, plugin, "filesystem/list", mergeIntegration(base, map[string]any{"uri": "s3:/", "limit": 20, "filter": "ROOT"}))
+	if pluginError != nil {
+		t.Fatal(pluginError.Message)
+	}
+	if len(filtered["entries"].([]filesystemEntry)) != 1 || !containsEntry(filtered, "root.txt", "file") {
+		t.Fatalf("unexpected filtered listing: %#v", filtered)
 	}
 	for _, entry := range list["entries"].([]filesystemEntry) {
 		if entry.URI != objectURI(bucket, "root.txt") && entry.URI != objectURI(bucket, "folder/") {

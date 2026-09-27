@@ -51,14 +51,15 @@ func (plugin *plugin) listObjects(values map[string]any) (any, *dbxpluginsdk.Plu
 	cursor := decodeCursor(stringValue(values["cursor"]))
 	remotePrefix := connection.remoteKey(prefix)
 	remoteCursor := connection.remoteKey(cursor)
+	nameFilter := strings.ToLower(strings.TrimSpace(stringValue(values["filter"])))
 	// Folder trees want directories only, but S3 pages folders and files
 	// together; keep draining pages (bounded by a file-scan budget) and skip
 	// files so one request yields a full page of folders.
 	directoriesOnly := boolValue(values["directoriesOnly"])
-	objects := connection.client.ListObjects(context, path.bucket, minio.ListObjectsOptions{Prefix: remotePrefix, Recursive: false, StartAfter: remoteCursor, MaxKeys: limit + 1})
+	objects := listObjectsCompatible(context, connection.client, path.bucket, minio.ListObjectsOptions{Prefix: remotePrefix, Recursive: false, StartAfter: remoteCursor, MaxKeys: limit + 1})
 	listedObjects := make([]minio.ObjectInfo, 0, limit+1)
 	seenKeys := make(map[string]struct{}, limit+1)
-	scannedFiles := 0
+	scannedKeys := 0
 	lastScanned := ""
 	budgetExhausted := false
 	for object := range objects {
@@ -70,15 +71,21 @@ func (plugin *plugin) listObjects(values map[string]any) (any, *dbxpluginsdk.Plu
 			continue
 		}
 		lastScanned = localKey
+		scannedKeys++
+		budgetReached := (directoriesOnly || nameFilter != "") && scannedKeys >= maxDirectoryScanKeys
 		if directoriesOnly && !strings.HasSuffix(localKey, "/") {
-			if scannedFiles++; scannedFiles >= maxDirectoryScanKeys {
+			if budgetReached {
 				budgetExhausted = true
 				break
 			}
 			continue
 		}
 		entry := entryFromObject(minio.ObjectInfo{Key: localKey}, path.bucket)
-		if !validEntryName(entry.Name) {
+		if !validEntryName(entry.Name) || (nameFilter != "" && !strings.Contains(strings.ToLower(entry.Name), nameFilter)) {
+			if budgetReached {
+				budgetExhausted = true
+				break
+			}
 			continue
 		}
 		object.Key = localKey
@@ -88,6 +95,10 @@ func (plugin *plugin) listObjects(values map[string]any) (any, *dbxpluginsdk.Plu
 		seenKeys[localKey] = struct{}{}
 		listedObjects = append(listedObjects, object)
 		if len(listedObjects) >= limit+1 {
+			break
+		}
+		if budgetReached {
+			budgetExhausted = true
 			break
 		}
 	}
@@ -103,6 +114,10 @@ func (plugin *plugin) listObjects(values map[string]any) (any, *dbxpluginsdk.Plu
 		// The scan budget ran out mid-page; resume after the last key examined.
 		result["nextCursor"] = encodeCursor(lastScanned)
 	} else if path.key != "" && !directoriesOnly && len(entries) == 0 {
+		if nameFilter != "" && lastScanned != "" {
+			result["exists"] = true
+			return result, nil
+		}
 		// An empty listing is ambiguous between "folder exists but is empty"
 		// and "nothing under this prefix at all"; a marker-object probe lets
 		// path navigation report a genuine miss instead of a silent empty view.
@@ -118,6 +133,7 @@ func (plugin *plugin) listBuckets(context context.Context, connection *s3Connect
 		limit = defaultPageSize
 	}
 	cursor := decodeCursor(stringValue(values["cursor"]))
+	nameFilter := strings.ToLower(strings.TrimSpace(stringValue(values["filter"])))
 	buckets, err := connection.client.ListBuckets(context)
 	if err != nil {
 		return nil, remoteError("S3 bucket listing failed: " + err.Error())
@@ -125,7 +141,7 @@ func (plugin *plugin) listBuckets(context context.Context, connection *s3Connect
 	sort.Slice(buckets, func(left, right int) bool { return buckets[left].Name < buckets[right].Name })
 	entries := make([]filesystemEntry, 0, minInt(limit, len(buckets)))
 	for _, bucket := range buckets {
-		if bucket.Name <= cursor || !validEntryName(bucket.Name) {
+		if bucket.Name <= cursor || !validEntryName(bucket.Name) || (nameFilter != "" && !strings.Contains(strings.ToLower(bucket.Name), nameFilter)) {
 			continue
 		}
 		entries = append(entries, filesystemEntry{
@@ -413,7 +429,7 @@ func prefixExists(parentContext context.Context, connection *s3Connection, path 
 	childContext, cancel := context.WithCancel(parentContext)
 	defer cancel()
 	remotePath := connection.remotePath(path)
-	objects := connection.client.ListObjects(childContext, remotePath.bucket, minio.ListObjectsOptions{Prefix: remotePath.key, Recursive: true, MaxKeys: 1})
+	objects := listObjectsCompatible(childContext, connection.client, remotePath.bucket, minio.ListObjectsOptions{Prefix: remotePath.key, Recursive: true, MaxKeys: 1})
 	for object := range objects {
 		return object.Err == nil
 	}
@@ -422,7 +438,7 @@ func prefixExists(parentContext context.Context, connection *s3Connection, path 
 
 func deletePrefix(context context.Context, connection *s3Connection, path objectPath) *dbxpluginsdk.PluginError {
 	remotePath := connection.remotePath(path)
-	objects := connection.client.ListObjects(context, remotePath.bucket, minio.ListObjectsOptions{Prefix: remotePath.key, Recursive: true})
+	objects := listObjectsCompatible(context, connection.client, remotePath.bucket, minio.ListObjectsOptions{Prefix: remotePath.key, Recursive: true})
 	for object := range objects {
 		if object.Err != nil {
 			return remoteError("S3 recursive delete listing failed: " + object.Err.Error())
@@ -437,7 +453,7 @@ func deletePrefix(context context.Context, connection *s3Connection, path object
 func copyPrefix(context context.Context, connection *s3Connection, source objectPath, target objectPath) *dbxpluginsdk.PluginError {
 	remoteSource := connection.remotePath(source)
 	remoteTarget := connection.remotePath(target)
-	objects := connection.client.ListObjects(context, remoteSource.bucket, minio.ListObjectsOptions{Prefix: remoteSource.key, Recursive: true})
+	objects := listObjectsCompatible(context, connection.client, remoteSource.bucket, minio.ListObjectsOptions{Prefix: remoteSource.key, Recursive: true})
 	for object := range objects {
 		if object.Err != nil {
 			return remoteError("S3 directory copy listing failed: " + object.Err.Error())
