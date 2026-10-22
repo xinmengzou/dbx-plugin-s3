@@ -359,6 +359,9 @@
     previewReader = undefined;
     selected = entry;
     entryMetadata = null;
+    // A collapsed pane shows nothing, so skip the preview work entirely;
+    // expanding re-selects the current row to load it.
+    if (previewCollapsed) return;
     if (entry.kind === "directory" || entry.kind === "bucket") {
       preview = { kind: "empty", value: "", type: text.folder, truncated: false };
       return;
@@ -1053,7 +1056,7 @@
   <div class="toolbar">
     <div class="path-group">
       <Button variant="outline" size="icon-sm" aria-pressed={treeVisible} aria-label={text.folderTree} title={text.folderTree} onclick={() => { treeVisible = !treeVisible; saveUiPrefs(); }}><ListTree size={14} /></Button>
-      <Button variant="outline" size="icon-sm" aria-pressed={!previewCollapsed} aria-label={text.previewPane} title={text.previewPane} onclick={() => { previewCollapsed = !previewCollapsed; saveUiPrefs(); }}><PanelRight size={14} /></Button>
+      <Button variant="outline" size="icon-sm" aria-pressed={!previewCollapsed} aria-label={text.previewPane} title={text.previewPane} onclick={() => { previewCollapsed = !previewCollapsed; if (previewCollapsed) releasePreviewUrl(); else if (selected) void selectEntry(selected); saveUiPrefs(); }}><PanelRight size={14} /></Button>
       <Button variant="outline" size="icon-sm" aria-label={text.up} title={text.up} disabled={!parentUri() || loading} onclick={() => load(parentUri())}><ArrowUp size={14} /></Button>
       {#if pathEditing}
         <input aria-label={text.path} bind:value={pathDraft} bind:this={pathInput} onkeydown={(event) => {
@@ -1093,7 +1096,7 @@
     {/if}
     <ObjectList {entries} {selected} {checkedUris} {loading} {nextCursor} {focusTarget} {text} onSelect={selectEntry} onOpen={openEntry} onContextMenu={openContextMenu} onBackgroundContextMenu={(event) => openContextMenu(event, null)} onLoadMore={() => load(currentUri, true)} onToggleCheck={toggleCheck} onToggleCheckAll={toggleCheckAll} />
     {#if !previewCollapsed}<button class="splitter" aria-label="Resize panels" onpointerdown={startResize}></button>{/if}
-    <PreviewPane {selected} {preview} metadata={entryMetadata} {text} {readOnly} onRename={renameEntry} onDelete={deleteEntry} onDownload={downloadEntry} onShare={shareEntry} onVersions={showVersions} onDetails={showDetails} onSheetChange={(value) => (preview = value)} />
+    {#if !previewCollapsed}<PreviewPane {selected} {preview} metadata={entryMetadata} {text} {readOnly} onRename={renameEntry} onDelete={deleteEntry} onDownload={downloadEntry} onShare={shareEntry} onVersions={showVersions} onDetails={showDetails} onSheetChange={(value) => (preview = value)} />{/if}
   </section>
   {#if contextMenu}
     <div class="context-menu" data-dbx-context-menu role="menu" tabindex="-1" style={`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`} oncontextmenu={(event) => event.preventDefault()}>
