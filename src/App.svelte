@@ -569,11 +569,16 @@
       let overwriteChain = Promise.resolve();
       const askOverwrite = (name) => {
         // Dialogs must not stack, so parallel workers queue up on this chain
-        // and prompt one at a time.
-        const asked = overwriteChain.then(() => new Promise((resolve) => {
-          dialog = { kind: "overwrite", name, resolve, batch: uploadQueue.length > 1 };
-          dialogOpen = true;
-        }));
+        // and prompt one at a time. A decision made while a prompt sits
+        // queued applies the moment its turn arrives.
+        const asked = overwriteChain.then(() => {
+          if (conflictMode === "skipAll") return "skip";
+          if (conflictMode === "overwriteAll") return "overwrite";
+          return new Promise((resolve) => {
+            dialog = { kind: "overwrite", name, resolve, batch: uploadQueue.length > 1 };
+            dialogOpen = true;
+          });
+        });
         overwriteChain = asked.then(() => undefined, () => undefined);
         return asked;
       };
@@ -639,12 +644,18 @@
         }
       };
       try {
-        await mapWithConcurrency(uploadQueue, 3, processItem);
+        const queue = uploadQueue;
+        await mapWithConcurrency(queue, 3, processItem);
         const settled = (status) => uploadQueue.filter((item) => item.status === status).length;
         const failed = settled("failed");
         const skipped = settled("skipped");
         if (failed || skipped) {
           notice = text.uploadFinished.replace("{done}", String(settled("done"))).replace("{skipped}", String(skipped)).replace("{failed}", String(failed));
+        }
+        if (!failed && !skipped && !controller.signal.aborted) {
+          // Fully successful batches fold the panel away after a beat; any
+          // failure, skip, or cancel keeps it open so row states stay visible.
+          setTimeout(() => { if (uploadQueue === queue) uploadPanelOpen = false; }, 2500);
         }
         if (controller.signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
         return uploadQueue.filter((item) => item.status === "done").map((item) => item.targetUri);
@@ -882,8 +893,11 @@
     if (ok) setTimeout(() => { if (dialog?.kind === "clipboard-upload") dialog.copied = ""; }, 2000);
   }
 
-  function settleOverwrite(accept) {
-    if (dialog?.kind === "overwrite") dialog.resolve?.(accept);
+  function settleOverwrite(decision) {
+    if (dialog?.kind !== "overwrite") return;
+    dialog.resolve?.(decision);
+    dialogOpen = false;
+    dialog = null;
   }
 
   function handleDialogOpenChange(open) {
