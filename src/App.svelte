@@ -435,6 +435,7 @@
   function openEntry(entry) {
     contextMenu = null;
     if (entry.kind === "directory" || entry.kind === "bucket") void load(entry.uri);
+    else if (previewCollapsed) { previewCollapsed = false; saveUiPrefs(); void selectEntry(entry); }
   }
 
   function openContextMenu(event, entry) {
