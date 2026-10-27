@@ -5,7 +5,7 @@
   import FolderTree from "./components/FolderTree.svelte";
   import { Button } from "./lib/components/ui/button/index.js";
   import * as Dialog from "./lib/components/ui/dialog/index.js";
-  import { inlineUploadBytes, uploadFile, uploadPathTarget, uploadTarget } from "./lib/uploads.js";
+  import { inlineUploadBytes, resolveUploadTarget, uploadFile, uploadPathTarget, uploadTarget, uploadTargetDraft } from "./lib/uploads.js";
   import { collectDroppedFiles } from "./lib/drag-drop.js";
   import { mapWithConcurrency } from "./lib/concurrency.js";
   import { clipboardImageMarkdown, clipboardImagePath } from "./lib/clipboard-image.js";
@@ -37,6 +37,7 @@
       readOnlyMode: "Read-only", readOnlyTitle: "This connection is marked read-only in DBX; uploads, deletes, renames, and folder creation are disabled.",
       uploadFolder: "Upload folder", folderUploadHint: "Preserves the selected folder and nested files. Empty folders are omitted by the browser.", uploadCancelled: "Upload cancelled. Completed files are kept.", confirmingUpload: "Waiting for storage confirmation…", versions: "Versions", noVersions: "No versions found.", latestVersion: "Latest", deletedVersion: "Delete marker", versionsTruncated: "Showing the first 1,000 versions.", versionUploadHint: "Same-name uploads create a new version when bucket versioning is enabled; otherwise you will be asked whether to overwrite.",
       dropUpload: "Drop files or folders here to upload", overwriteAll: "Overwrite all", skipFile: "Skip", skipAll: "Skip all", uploadQueue: "Upload queue", uploadFinished: "Upload finished: {done} succeeded, {skipped} skipped, {failed} failed.", statusPending: "Pending", statusDone: "Done", statusFailed: "Failed", statusSkipped: "Skipped", statusCancelled: "Cancelled",
+      uploadTo: "Upload to", selectedFiles: "{count} files · {size}", uploadTargetRequired: "Enter a target path starting with the bucket name.", uploadTargetHint: "Missing folders are created automatically, so the path may point anywhere in the bucket.",
     },
     zh: {
       locale: "zh-CN", size: "大小", modified: "修改时间", modifiedHint: "S3 最后修改时间（上传或覆盖），按本地时区显示。", saving: "正在保存",
@@ -51,6 +52,7 @@
       readOnlyMode: "只读", readOnlyTitle: "此连接已在 DBX 中标记为只读，上传、删除、重命名和新建文件夹已被禁用。",
       uploadFolder: "上传文件夹", folderUploadHint: "保留所选文件夹及嵌套文件的路径。浏览器不会包含空文件夹。", uploadCancelled: "上传已取消，已完成的文件会保留。", confirmingUpload: "等待存储服务确认…", versions: "版本历史", noVersions: "未找到历史版本。", latestVersion: "最新", deletedVersion: "删除标记", versionsTruncated: "仅显示前 1,000 个版本。", versionUploadHint: "同名上传在存储桶启用版本管理时自动创建新版本，否则会询问是否覆盖。",
       dropUpload: "松开鼠标，上传文件或文件夹", overwriteAll: "全部覆盖", skipFile: "跳过", skipAll: "全部跳过", uploadQueue: "上传队列", uploadFinished: "上传完成：成功 {done} 个，跳过 {skipped} 个，失败 {failed} 个。", statusPending: "等待中", statusDone: "完成", statusFailed: "失败", statusSkipped: "已跳过", statusCancelled: "已取消",
+      uploadTo: "上传至", selectedFiles: "{count} 个文件 · {size}", uploadTargetRequired: "请输入以桶名开头的目标路径。", uploadTargetHint: "目录不存在时会自动创建，可填写桶内任意路径。",
     },
   };
 
@@ -93,6 +95,10 @@
   let focusSeq = 0;
   let uploadInput = $state(null);
   let folderUploadInput = $state(null);
+  let uploadTargetInput = $state(null);
+  // Files chosen through the picker or a drop await the upload dialog's
+  // target path.
+  let pendingUpload = $state(null);
   let uploadController;
   let downloadController;
   let dialog = $state(null);
@@ -533,20 +539,46 @@
     uploadInput?.click();
   }
 
-  async function uploadFiles(event) {
+  // Files picked through the inputs and files dropped onto the window all
+  // funnel into one confirm dialog: the prefilled "upload to" path can be
+  // edited to any folder, so users never navigate to the target first.
+  function openUploadDialog(files, folder) {
+    if (!files.length || readOnly || operating) return;
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+    pendingUpload = { files };
+    dialog = { kind: "upload", value: displayUri(uploadTargetDraft(currentUri)), count: files.length, size: totalBytes, folder: folder || files.some((file) => file.webkitRelativePath), error: "" };
+    dialogOpen = true;
+    // The dialog body mounts through a portal; focus lands once it has painted.
+    void tick().then(() => requestAnimationFrame(() => { uploadTargetInput?.focus(); uploadTargetInput?.select(); }));
+  }
+
+  async function uploadFiles(event, folder) {
     const input = event.currentTarget;
     const files = [...(input.files || [])];
     input.value = "";
-    await uploadItems(files);
+    openUploadDialog(files, folder);
   }
 
-  async function uploadItems(files, targetForFile) {
+  async function confirmUploadTarget() {
+    const active = dialog;
+    const upload = pendingUpload;
+    if (active?.kind !== "upload" || !upload) return;
+    const uploadUri = resolveUploadTarget(active.value, { bucketScoped, scopedBucket });
+    if (!uploadUri) {
+      active.error = text.uploadTargetRequired;
+      return;
+    }
+    cancelDialog();
+    await uploadItems(upload.files, undefined, uploadUri);
+  }
+
+  async function uploadItems(files, targetForFile, targetBaseUri) {
     if (!files.length || readOnly || operating) return;
     notice = "";
     // Pin the target folder up front: a multi-file upload runs for a while
     // and later files must land next to the first, not in whatever folder
     // the user is browsing by then.
-    const uploadUri = currentUri;
+    const uploadUri = targetBaseUri || currentUri;
     const uploadConnection = connectionId();
     const uploadInvoke = (method, params, options) => window.dbxPlugin.invoke(method, { ...params, connectionId: uploadConnection, providerId }, options);
     uploadPanelOpen = true;
@@ -685,7 +717,7 @@
   async function handleDrop(event) {
     try {
       const files = await collectDroppedFiles(event.dataTransfer);
-      if (files.length) await uploadItems(files);
+      openUploadDialog(files, false);
     } catch (cause) {
       error = cause?.message || String(cause);
     }
@@ -905,6 +937,7 @@
     if (!open) {
       settleOverwrite(false);
       dialog = null;
+      pendingUpload = null;
     }
   }
 
@@ -912,6 +945,7 @@
     settleOverwrite(false);
     dialogOpen = false;
     dialog = null;
+    pendingUpload = null;
   }
 
   function closeContextMenu() {
@@ -920,7 +954,7 @@
 
   async function confirmDialog() {
     const active = dialog;
-    if (!active || active.kind === "share" || active.kind === "versions" || active.kind === "details" || active.kind === "copy-path" || active.kind === "clipboard-upload") return;
+    if (!active || active.kind === "share" || active.kind === "versions" || active.kind === "details" || active.kind === "copy-path" || active.kind === "clipboard-upload" || active.kind === "upload") return;
     if (active.kind === "overwrite") {
       active.resolve?.(true);
       dialogOpen = false;
@@ -1165,8 +1199,8 @@
       {#if checkedUris.length}<Button variant="outline" size="sm" disabled={loading || operating} title={text.downloadZipCount.replace("{count}", checkedUris.length)} onclick={() => downloadArchive(checkedUris)}><FileArchive size={14} />{text.downloadZipCount.replace("{count}", checkedUris.length)}</Button>{/if}
       {#if checkedUris.length && !readOnly}<Button variant="destructive" size="sm" disabled={loading || operating} onclick={deleteChecked}><Trash2 size={14} />{text.deleteCount.replace("{count}", checkedUris.length)}</Button>{/if}
     </div>
-    <input bind:this={uploadInput} hidden type="file" multiple onchange={uploadFiles} />
-    <input bind:this={folderUploadInput} hidden type="file" multiple webkitdirectory onchange={uploadFiles} />
+    <input bind:this={uploadInput} hidden type="file" multiple onchange={(event) => uploadFiles(event, false)} />
+    <input bind:this={folderUploadInput} hidden type="file" multiple webkitdirectory onchange={(event) => uploadFiles(event, true)} />
   </div>
   {#if transfer}<div class="transfer" role="status" aria-live="polite"><span class="transfer-label">{(transfer.saving ? text.saving : transfer.confirming ? text.confirmingUpload : transfer.kind === "upload" ? text.uploading : text.downloading) + " " + transfer.name}{transfer.fileCount > 1 ? ` (${transfer.fileIndex}/${transfer.fileCount})` : ""}</span><div class="transfer-bar"><div class="transfer-fill" style={`width: ${transferPercent()}%`}></div></div><span class="transfer-percent">{transferPercent()}%</span><Button variant="ghost" size="sm" disabled={transfer.saving} onclick={() => (transfer.kind === "upload" ? uploadController : downloadController)?.abort()}>{text.cancel}</Button></div>{/if}
   {#if error}<div class="error">{text.error}: {error}</div>{/if}
@@ -1226,10 +1260,11 @@
     {#if dialog}
       <Dialog.Content showCloseButton={false} class={`dialog-content${dialog.kind === "versions" ? " versions-dialog" : ""}`}>
         <Dialog.Header>
-          <Dialog.Title>{dialog.kind === "versions" ? text.versions : dialog.kind === "details" ? text.details : dialog.kind === "delete" || dialog.kind === "delete-batch" ? text.delete : dialog.kind === "rename" ? text.rename : dialog.kind === "share" ? text.share : dialog.kind === "copy-path" ? text.copyPath : dialog.kind === "clipboard-upload" ? text.clipboardUploaded : dialog.kind === "overwrite" ? text.overwriteTitle : text.newFolder}</Dialog.Title>
+          <Dialog.Title>{dialog.kind === "versions" ? text.versions : dialog.kind === "details" ? text.details : dialog.kind === "delete" || dialog.kind === "delete-batch" ? text.delete : dialog.kind === "rename" ? text.rename : dialog.kind === "share" ? text.share : dialog.kind === "copy-path" ? text.copyPath : dialog.kind === "clipboard-upload" ? text.clipboardUploaded : dialog.kind === "upload" ? text.upload : dialog.kind === "overwrite" ? text.overwriteTitle : text.newFolder}</Dialog.Title>
           {#if dialog.kind === "delete"}<Dialog.Description>{text.confirmDelete.replace("{name}", dialog.entry.name)}</Dialog.Description>
           {:else if dialog.kind === "delete-batch"}<Dialog.Description>{text.confirmDeleteCount.replace("{count}", dialog.count)}</Dialog.Description>
           {:else if dialog.kind === "overwrite"}<Dialog.Description>{text.confirmOverwrite.replace("{name}", dialog.name)}</Dialog.Description>
+          {:else if dialog.kind === "upload"}<Dialog.Description>{text.selectedFiles.replace("{count}", dialog.count).replace("{size}", formatObjectSize(dialog.size, text.locale))}{#if dialog.folder} · {text.uploadFolder}{/if}</Dialog.Description>
           {:else if dialog.kind === "share" || dialog.kind === "versions" || dialog.kind === "details" || dialog.kind === "copy-path" || dialog.kind === "clipboard-upload"}<Dialog.Description>{dialog.entry.name}</Dialog.Description>{/if}
         </Dialog.Header>
         {#if dialog.kind === "share"}
@@ -1293,6 +1328,11 @@
             <div class="share-hint">{text.clipboardLinkExpires}</div>
             {#if dialog.copyBlocked}<div class="share-hint">{text.copyBlocked}</div>{/if}
           </div>
+        {:else if dialog.kind === "upload"}
+          {#if dialog.folder}<p class="share-hint">{text.folderUploadHint}</p>{/if}
+          <label class="dialog-field">{text.uploadTo}<input bind:this={uploadTargetInput} bind:value={dialog.value} spellcheck="false" aria-label={text.uploadTo} onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmUploadTarget(); } }} /></label>
+          <p class="share-hint">{text.uploadTargetHint}</p>
+          {#if dialog.error}<div class="share-error">{dialog.error}</div>{/if}
         {:else if dialog.kind === "overwrite"}
           <p class="share-hint">{text.confirmOverwriteHint}</p>
         {:else if dialog.kind !== "delete" && dialog.kind !== "delete-batch"}
@@ -1319,6 +1359,9 @@
               <Button variant="outline" onclick={cancelDialog}>{text.cancel}</Button>
               <Button variant="destructive" onclick={confirmDialog}>{text.overwrite}</Button>
             {/if}
+          {:else if dialog.kind === "upload"}
+            <Button variant="outline" onclick={cancelDialog}>{text.cancel}</Button>
+            <Button onclick={confirmUploadTarget}><Upload size={14} />{text.upload}</Button>
           {:else}
             <Button variant={dialog.kind === "delete" || dialog.kind === "delete-batch" ? "destructive" : "default"} onclick={confirmDialog}>{dialog.kind === "delete" || dialog.kind === "delete-batch" ? text.delete : text.confirm}</Button>
           {/if}
